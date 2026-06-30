@@ -9,13 +9,13 @@ Usage
 
 import argparse
 import os
-import numpy as np
 import librosa
 import soundfile as sf
 
 from denoise import estimate_noise_profile, spectral_subtraction
 from transcribe import transcribe_audio
-from plots import plot_fft_comparison, plot_temporal, plot_periodic_spectrogram
+from plots import (plot_fft_comparison, plot_temporal,
+                   plot_periodic_spectrogram, plot_gain_mask)
 
 SR = 16000
 
@@ -38,21 +38,26 @@ def main():
     default_noise = os.path.join(script_dir, "ref.wav")
 
     pa = argparse.ArgumentParser(description="Débruitage + STT audio IRM")
-    pa.add_argument("--input_dir",  required=True, help="Dossier des .wav")
-    pa.add_argument("--noise_file", default=default_noise,
-                    help="Bruit gradient pur (défaut : ref.wav)")
-    pa.add_argument("--output_dir", default="./output")
-    pa.add_argument("--tr_ms",    type=float, default=1660)
-    pa.add_argument("--alpha",    type=float, default=2.0)
-    pa.add_argument("--beta",     type=float, default=0.02)
-    pa.add_argument("--language", default="fr-FR",
-                    help="Code langue Google (défaut : fr-FR)")
-    pa.add_argument("--no_plots", action="store_true")
+    pa.add_argument("--input_dir",    required=True)
+    pa.add_argument("--noise_file",   default=default_noise)
+    pa.add_argument("--output_dir",   default="./output")
+    pa.add_argument("--tr_ms",        type=float, default=1660)
+    pa.add_argument("--alpha",        type=float, default=1.0,
+                    help="Facteur bruit (1.0=neutre, >1=plus agressif)")
+    pa.add_argument("--beta",         type=float, default=0.05,
+                    help="Plancher gain hors bande vocale")
+    pa.add_argument("--speech_floor", type=float, default=0.10,
+                    help="Plancher gain dans bande vocale (200-4000 Hz)")
+    pa.add_argument("--dd_alpha",     type=float, default=0.98,
+                    help="Lissage decision-directed (0.9-0.99)")
+    pa.add_argument("--adapt_window", type=float, default=0.5,
+                    help="Fenêtre adaptation bruit (secondes)")
+    pa.add_argument("--language",     default="fr-FR")
+    pa.add_argument("--no_plots",     action="store_true")
     args = pa.parse_args()
 
     if not os.path.isfile(args.noise_file):
         print(f"✗ Fichier de bruit introuvable : {args.noise_file}")
-        print("  Place ref.wav à côté de main.py ou utilise --noise_file")
         return
 
     plots_dir = os.path.join(args.output_dir, "plots")
@@ -62,25 +67,24 @@ def main():
 
     # ── 1. Profil de bruit ──
     print(f"\n{'='*60}")
-    print("  PIPELINE AUDIO IRM — DÉBRUITAGE & TRANSCRIPTION GOOGLE")
+    print("  PIPELINE AUDIO IRM — WIENER ADAPTATIF + GOOGLE STT")
     print(f"{'='*60}")
     print(f"\n► Bruit de référence : {args.noise_file}")
     noise = load_audio(args.noise_file)
     noise_profile = estimate_noise_profile(noise, SR)
-    print(f"  Durée : {len(noise)/SR:.1f}s — "
-          f"Profil : {len(noise_profile)} bins fréquentiels")
+    print(f"  Durée : {len(noise)/SR:.1f}s")
 
-    # ── 2. Lister les fichiers ──
+    # ── 2. Fichiers ──
     wav_files = find_wav_files(args.input_dir)
     noise_abs = os.path.abspath(args.noise_file)
     wav_files = [f for f in wav_files if os.path.abspath(f) != noise_abs]
     print(f"► {len(wav_files)} fichier(s) à traiter\n")
 
     if not wav_files:
-        print("Aucun .wav trouvé. Fin.")
+        print("Aucun .wav trouvé.")
         return
 
-    # ── 3. Boucle de traitement ──
+    # ── 3. Traitement ──
     results = []
 
     for i, path in enumerate(wav_files):
@@ -91,9 +95,17 @@ def main():
         raw = load_audio(path)
         print(f"  Durée : {len(raw)/SR:.1f}s")
 
-        # Débruitage
-        clean = spectral_subtraction(raw, SR, noise_profile,
-                                     alpha=args.alpha, beta=args.beta)
+        # Débruitage avec extras pour les plots
+        clean, extras = spectral_subtraction(
+            raw, SR, noise_profile,
+            alpha=args.alpha,
+            beta=args.beta,
+            speech_floor=args.speech_floor,
+            dd_alpha=args.dd_alpha,
+            adapt_window_s=args.adapt_window,
+            return_extras=True,
+        )
+
         out_wav = os.path.join(audio_dir, f"{name}_denoised.wav")
         sf.write(out_wav, clean, SR)
         print(f"  ✓ Débruité → {out_wav}")
@@ -107,9 +119,11 @@ def main():
             plot_periodic_spectrogram(raw, clean, SR, tr_ms=args.tr_ms,
                 title=name,
                 save_path=os.path.join(plots_dir, f"{name}_periodic.png"))
+            plot_gain_mask(extras, SR, title=name,
+                save_path=os.path.join(plots_dir, f"{name}_gain_mask.png"))
             print(f"  ✓ Plots → {plots_dir}/")
 
-        # Transcription brute + débruitée
+        # Transcription
         print("  ⏳ Transcription (brut)…")
         text_raw = transcribe_audio(raw, SR, args.language)
         print("  ⏳ Transcription (débruité)…")
@@ -120,14 +134,18 @@ def main():
 
         results.append(dict(file=name, raw=text_raw, clean=text_clean))
 
-    # ── 4. Écriture du fichier de résultats ──
+    # ── 4. Résultats ──
     out_txt = os.path.join(args.output_dir, "transcriptions.txt")
     with open(out_txt, "w", encoding="utf-8") as f:
-        f.write("TRANSCRIPTIONS AUDIO IRM — GOOGLE SPEECH\n")
+        f.write("TRANSCRIPTIONS AUDIO IRM — WIENER ADAPTATIF\n")
         f.write(f"{'='*60}\n")
-        f.write(f"Langue : {args.language}\n")
-        f.write(f"Alpha  : {args.alpha}  |  Beta : {args.beta}\n")
-        f.write(f"TR     : {args.tr_ms} ms\n")
+        f.write(f"Langue       : {args.language}\n")
+        f.write(f"Alpha        : {args.alpha}\n")
+        f.write(f"Beta         : {args.beta}\n")
+        f.write(f"Speech floor : {args.speech_floor}\n")
+        f.write(f"DD alpha     : {args.dd_alpha}\n")
+        f.write(f"Adapt window : {args.adapt_window}s\n")
+        f.write(f"TR           : {args.tr_ms} ms\n")
         f.write(f"{'='*60}\n\n")
 
         all_raw, all_clean = [], []

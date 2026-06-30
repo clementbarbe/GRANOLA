@@ -1,14 +1,19 @@
-"""Visualisations : FFT, temporel, spectrogramme périodique EPI."""
+"""Visualisations : FFT, temporel, spectrogramme périodique, masque de gain."""
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import spectrogram
 from scipy.ndimage import uniform_filter1d
 
-plt.rcParams.update({"figure.facecolor": "white", "axes.grid": True, "grid.alpha": 0.3})
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+})
+
 
 # ──────────────────────────────────────────────
-#  1. Comparaison FFT avant / après débruitage
+#  1. FFT avant / après
 # ──────────────────────────────────────────────
 
 def plot_fft_comparison(audio_raw, audio_clean, sr, title="", save_path=None):
@@ -18,7 +23,6 @@ def plot_fft_comparison(audio_raw, audio_clean, sr, title="", save_path=None):
     db_raw = 20 * np.log10(np.abs(np.fft.rfft(audio_raw[:n])) + 1e-10)
     db_clean = 20 * np.log10(np.abs(np.fft.rfft(audio_clean[:n])) + 1e-10)
 
-    # Lissage pour lisibilité
     k = max(1, len(freqs) // 500)
     db_raw = uniform_filter1d(db_raw, k)
     db_clean = uniform_filter1d(db_clean, k)
@@ -38,7 +42,7 @@ def plot_fft_comparison(audio_raw, audio_clean, sr, title="", save_path=None):
 
 
 # ──────────────────────────────────────────────
-#  2. Signal temporel avant / après
+#  2. Signal temporel
 # ──────────────────────────────────────────────
 
 def plot_temporal(audio_raw, audio_clean, sr, title="", save_path=None):
@@ -68,29 +72,21 @@ def plot_temporal(audio_raw, audio_clean, sr, title="", save_path=None):
 
 def plot_periodic_spectrogram(audio_raw, audio_clean, sr, tr_ms=1660,
                               title="", save_path=None):
-    """
-    Segmente les signaux par période TR et affiche :
-      - ligne du haut  : spectrogramme complet (avec marqueurs TR)
-      - ligne du bas   : spectrogramme moyenné sur un TR
-    Colonnes : brut | débruité.
-    """
     tr_samp = int(tr_ms / 1000.0 * sr)
     n = min(len(audio_raw), len(audio_clean))
     n_trs = n // tr_samp
 
     if n_trs < 2:
-        print(f"  ⚠ Signal trop court pour l'analyse périodique "
-              f"({n / sr:.1f}s < 2×TR)")
+        print(f"  ⚠ Signal trop court pour l'analyse périodique")
         return
 
-    nps, nov = 256, 192  # paramètres spectrogram intra-TR
+    nps, nov = 256, 192
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
     for col, (audio, label) in enumerate(
         [(audio_raw[:n], "Brut"), (audio_clean[:n], "Débruité")]
     ):
-        # ---- spectrogramme complet ----
         f_f, t_f, Sxx_f = spectrogram(audio, fs=sr, nperseg=nps, noverlap=nov)
         axes[0, col].pcolormesh(
             t_f, f_f, 10 * np.log10(Sxx_f + 1e-10),
@@ -102,7 +98,6 @@ def plot_periodic_spectrogram(audio_raw, audio_clean, sr, tr_ms=1660,
         axes[0, col].set_ylabel("Fréquence (Hz)")
         axes[0, col].set_ylim(0, sr / 2)
 
-        # ---- spectrogramme moyen sur 1 TR ----
         segments = audio[: n_trs * tr_samp].reshape(n_trs, tr_samp)
         Sxx_avg = None
         for seg in segments:
@@ -124,6 +119,56 @@ def plot_periodic_spectrogram(audio_raw, audio_clean, sr, tr_ms=1660,
     fig.suptitle(f"Analyse périodique EPI (TR = {tr_ms} ms) — {title}",
                  fontsize=14, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 0.92, 0.96])
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+# ──────────────────────────────────────────────
+#  4. Masque de gain + courbe d'adaptation
+# ──────────────────────────────────────────────
+
+def plot_gain_mask(extras, sr, title="", save_path=None):
+    """
+    Affiche :
+    - Haut : le masque de gain (freq × time), vert = conservé, rouge = supprimé
+    - Bas  : le facteur d'échelle du bruit estimé dans le temps
+    """
+    gain = extras['gain']
+    freqs = extras['freqs']
+    times = extras['times']
+    noise_scale = extras['noise_scale']
+
+    fig, axes = plt.subplots(2, 1, figsize=(15, 8),
+                             gridspec_kw={'height_ratios': [3, 1]})
+
+    # ── Masque de gain ──
+    im = axes[0].pcolormesh(
+        times, freqs, gain,
+        shading='gouraud', cmap='RdYlGn', vmin=0, vmax=1,
+    )
+    axes[0].set_ylabel("Fréquence (Hz)")
+    axes[0].set_title(f"Masque de gain Wiener — {title}")
+    axes[0].set_ylim(0, sr / 2)
+    fig.colorbar(im, ax=axes[0], label="Gain (0 = supprimé, 1 = conservé)",
+                 shrink=0.8)
+
+    # ── Bandes vocales repères ──
+    for f in [200, 4000]:
+        axes[0].axhline(f, color='white', ls='--', lw=0.8, alpha=0.7)
+    axes[0].text(times[5], 2200, "bande vocale",
+                 color='white', fontsize=9, fontstyle='italic')
+
+    # ── Facteur d'échelle du bruit ──
+    axes[1].plot(times[:len(noise_scale)], noise_scale,
+                 color='#3498db', lw=1)
+    axes[1].fill_between(times[:len(noise_scale)], noise_scale,
+                         alpha=0.2, color='#3498db')
+    axes[1].set_xlabel("Temps (s)")
+    axes[1].set_ylabel("Niveau de bruit\n(échelle relative)")
+    axes[1].set_title("Estimation adaptative du niveau de bruit")
+
+    plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
