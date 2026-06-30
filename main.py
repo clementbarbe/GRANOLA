@@ -47,7 +47,10 @@ def main():
     pa.add_argument("--time_smooth", type=int,  default=DEFAULT_TIME_SMOOTH)
     pa.add_argument("--freq_smooth", type=int,  default=DEFAULT_FREQ_SMOOTH)
     pa.add_argument("--language",   default="fr-FR")
-    pa.add_argument("--no_plots",   action="store_true")
+    pa.add_argument("--plots",      action="store_true",
+                    help="Activer les plots (désactivé par défaut)")
+    pa.add_argument("--compare",    action="store_true",
+                    help="Transcrire aussi le signal brut pour comparaison")
     args = pa.parse_args()
 
     if not os.path.isfile(args.noise_file):
@@ -57,8 +60,10 @@ def main():
 
     plots_dir = os.path.join(args.output_dir, "plots")
     audio_dir = os.path.join(args.output_dir, "audio_denoised")
-    for d in [args.output_dir, plots_dir, audio_dir]:
+    for d in [args.output_dir, audio_dir]:
         os.makedirs(d, exist_ok=True)
+    if args.plots:
+        os.makedirs(plots_dir, exist_ok=True)
 
     print(f"\n{'='*60}")
     print("  🥣 GRANOLA — GRAdient NOise Less Audio")
@@ -69,6 +74,8 @@ def main():
     print(f"  Durée : {len(noise)/SR:.1f}s")
     print(f"► Paramètres : α={args.alpha}  β={args.beta}  "
           f"ts={args.time_smooth}  fs={args.freq_smooth}")
+    print(f"► Plots      : {'oui' if args.plots else 'non'}")
+    print(f"► Comparaison: {'oui' if args.compare else 'non'}")
 
     wav_files = find_wav_files(args.input_dir)
     noise_abs = os.path.abspath(args.noise_file)
@@ -98,7 +105,7 @@ def main():
         sf.write(out_wav, clean, SR)
         print(f"  ✓ Débruité → {out_wav}")
 
-        if not args.no_plots:
+        if args.plots:
             plot_fft_comparison(raw, clean, SR, title=name,
                 save_path=os.path.join(plots_dir, f"{name}_fft.png"))
             plot_temporal(raw, clean, SR, title=name,
@@ -108,44 +115,60 @@ def main():
                 save_path=os.path.join(plots_dir, f"{name}_periodic.png"))
             print(f"  ✓ Plots → {plots_dir}/")
 
-        print("  ⏳ Transcription (brut)…")
-        text_raw = transcribe_audio(raw, SR, args.language)
+        # Transcription brute (optionnelle)
+        text_raw = ""
+        if args.compare:
+            print("  ⏳ Transcription (brut)…")
+            text_raw = transcribe_audio(raw, SR, args.language)
+
+        # Transcription débruitée (toujours)
         print("  ⏳ Transcription (débruité)…")
         text_clean = transcribe_audio(clean, SR, args.language)
 
-        print(f"  ╔ BRUT     : {text_raw or '(vide)'}")
-        print(f"  ╚ DÉBRUITÉ : {text_clean or '(vide)'}")
+        if args.compare:
+            print(f"  ╔ BRUT     : {text_raw or '(vide)'}")
+            print(f"  ╚ DÉBRUITÉ : {text_clean or '(vide)'}")
+        else:
+            print(f"  ► RÉSULTAT : {text_clean or '(vide)'}")
 
         results.append(dict(file=name, raw=text_raw, clean=text_clean))
 
+    # ── Écriture des résultats ──
     out_txt = os.path.join(args.output_dir, "transcriptions.txt")
     with open(out_txt, "w", encoding="utf-8") as f:
         f.write("🥣 GRANOLA — GRAdient NOise Less Audio\n")
         f.write(f"{'='*60}\n")
-        f.write(f"Langue : {args.language}\n")
-        f.write(f"Alpha  : {args.alpha}  |  Beta : {args.beta}\n")
+        f.write(f"Langue      : {args.language}\n")
+        f.write(f"Alpha       : {args.alpha}  |  Beta : {args.beta}\n")
         f.write(f"Time smooth : {args.time_smooth}  |  Freq smooth : {args.freq_smooth}\n")
-        f.write(f"TR     : {args.tr_ms} ms\n")
+        f.write(f"TR          : {args.tr_ms} ms\n")
+        f.write(f"Comparaison : {'oui' if args.compare else 'non'}\n")
         f.write(f"{'='*60}\n\n")
 
-        all_raw, all_clean = [], []
+        all_clean = []
+        all_raw = []
 
         for r in results:
-            w_raw = r["raw"].lower().split()
             w_cln = r["clean"].lower().split()
-            all_raw.extend(w_raw)
             all_clean.extend(w_cln)
 
             f.write(f"--- {r['file']} ---\n")
-            f.write(f"  BRUT     : {r['raw']}\n")
-            f.write(f"  DÉBRUITÉ : {r['clean']}\n")
-            f.write(f"  Mots bruts    : {w_raw}\n")
-            f.write(f"  Mots débruités: {w_cln}\n\n")
+            if args.compare:
+                w_raw = r["raw"].lower().split()
+                all_raw.extend(w_raw)
+                f.write(f"  BRUT     : {r['raw']}\n")
+                f.write(f"  DÉBRUITÉ : {r['clean']}\n")
+                f.write(f"  Mots bruts    : {w_raw}\n")
+                f.write(f"  Mots débruités: {w_cln}\n\n")
+            else:
+                f.write(f"  RÉSULTAT : {r['clean']}\n")
+                f.write(f"  Mots     : {w_cln}\n\n")
 
-        f.write(f"\n{'='*60}\n")
-        f.write("MOTS — SANS DÉBRUITAGE\n")
-        f.write(f"{'='*60}\n")
-        f.write("\n".join(all_raw) + "\n")
+        if args.compare:
+            f.write(f"\n{'='*60}\n")
+            f.write("MOTS — SANS DÉBRUITAGE\n")
+            f.write(f"{'='*60}\n")
+            f.write("\n".join(all_raw) + "\n")
 
         f.write(f"\n{'='*60}\n")
         f.write("MOTS — AVEC DÉBRUITAGE\n")
@@ -155,7 +178,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"  ✓ Transcriptions : {out_txt}")
     print(f"  ✓ Audio débruité : {audio_dir}/")
-    if not args.no_plots:
+    if args.plots:
         print(f"  ✓ Plots          : {plots_dir}/")
     print(f"{'='*60}\n")
 
