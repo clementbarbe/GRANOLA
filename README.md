@@ -50,12 +50,6 @@ output/
 
 ## Paramètres
 
-|Paramètre |	Défaut |	Description |
-
-|--tr_ms	| 1660	| TR de la séquence EPI (pour les plots)|
---language	|fr-FR	|Langue de transcription|
-|--no_plots	|—	|Désactiver les plots|
-
 ```bash
 # Exemples
 python main.py --input_dir ./data --alpha 1.0
