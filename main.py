@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GRANOLA — GRAdient NOise Less Audio
-Pipeline : débruitage gradient IRM + transcription Google STT.
+Pipeline : débruitage gradient IRM + transcription Google STT + timecodes.
 """
 
 import argparse
@@ -12,7 +12,7 @@ import soundfile as sf
 from denoise import (estimate_noise_profile, spectral_subtraction,
                      DEFAULT_ALPHA, DEFAULT_BETA,
                      DEFAULT_TIME_SMOOTH, DEFAULT_FREQ_SMOOTH)
-from transcribe import transcribe_audio
+from transcribe import transcribe_google, detect_speech_segments, match_words_to_segments
 from plots import plot_fft_comparison, plot_temporal, plot_periodic_spectrogram
 
 SR = 16000
@@ -31,36 +31,42 @@ def load_audio(path):
     return audio
 
 
+def write_tsv(path, words):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("start\tend\tword\n")
+        for w in words:
+            f.write(f"{w['start']:.3f}\t{w['end']:.3f}\t{w['word']}\n")
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_noise = os.path.join(script_dir, "ref.wav")
 
     pa = argparse.ArgumentParser(
         description="GRANOLA — GRAdient NOise Less Audio")
-    pa.add_argument("--input_dir",  required=True, help="Dossier des .wav")
-    pa.add_argument("--noise_file", default=default_noise,
-                    help="Bruit gradient pur (défaut : ref.wav)")
-    pa.add_argument("--output_dir", default="./output")
-    pa.add_argument("--tr_ms",      type=float, default=1660)
-    pa.add_argument("--alpha",      type=float, default=DEFAULT_ALPHA)
-    pa.add_argument("--beta",       type=float, default=DEFAULT_BETA)
-    pa.add_argument("--time_smooth", type=int,  default=DEFAULT_TIME_SMOOTH)
-    pa.add_argument("--freq_smooth", type=int,  default=DEFAULT_FREQ_SMOOTH)
-    pa.add_argument("--language",   default="fr-FR")
-    pa.add_argument("--plots",      action="store_true",
-                    help="Activer les plots (désactivé par défaut)")
-    pa.add_argument("--compare",    action="store_true",
-                    help="Transcrire aussi le signal brut pour comparaison")
+    pa.add_argument("--input_dir",   required=True)
+    pa.add_argument("--noise_file",  default=default_noise)
+    pa.add_argument("--output_dir",  default="./output")
+    pa.add_argument("--tr_ms",       type=float, default=1660)
+    pa.add_argument("--alpha",       type=float, default=DEFAULT_ALPHA)
+    pa.add_argument("--beta",        type=float, default=DEFAULT_BETA)
+    pa.add_argument("--time_smooth", type=int,   default=DEFAULT_TIME_SMOOTH)
+    pa.add_argument("--freq_smooth", type=int,   default=DEFAULT_FREQ_SMOOTH)
+    pa.add_argument("--language",    default="fr-FR")
+    pa.add_argument("--stt_source",  choices=["raw", "denoised"], default="raw",
+                    help="Signal utilisé pour le STT (défaut : raw)")
+    pa.add_argument("--plots",       action="store_true")
+    pa.add_argument("--compare",     action="store_true")
     args = pa.parse_args()
 
     if not os.path.isfile(args.noise_file):
         print(f"✗ Fichier de bruit introuvable : {args.noise_file}")
-        print("  Place ref.wav à côté de main.py ou utilise --noise_file")
         return
 
-    plots_dir = os.path.join(args.output_dir, "plots")
+    tsv_dir = os.path.join(args.output_dir, "transcriptions")
     audio_dir = os.path.join(args.output_dir, "audio_denoised")
-    for d in [args.output_dir, audio_dir]:
+    plots_dir = os.path.join(args.output_dir, "plots")
+    for d in [args.output_dir, tsv_dir, audio_dir]:
         os.makedirs(d, exist_ok=True)
     if args.plots:
         os.makedirs(plots_dir, exist_ok=True)
@@ -68,25 +74,22 @@ def main():
     print(f"\n{'='*60}")
     print("  🥣 GRANOLA — GRAdient NOise Less Audio")
     print(f"{'='*60}")
-    print(f"\n► Bruit de référence : {args.noise_file}")
+
     noise = load_audio(args.noise_file)
     noise_profile = estimate_noise_profile(noise, SR)
-    print(f"  Durée : {len(noise)/SR:.1f}s")
+    print(f"► Bruit      : {args.noise_file} ({len(noise)/SR:.1f}s)")
     print(f"► Paramètres : α={args.alpha}  β={args.beta}  "
           f"ts={args.time_smooth}  fs={args.freq_smooth}")
-    print(f"► Plots      : {'oui' if args.plots else 'non'}")
-    print(f"► Comparaison: {'oui' if args.compare else 'non'}")
+    print(f"► STT sur    : {args.stt_source}")
 
     wav_files = find_wav_files(args.input_dir)
     noise_abs = os.path.abspath(args.noise_file)
     wav_files = [f for f in wav_files if os.path.abspath(f) != noise_abs]
-    print(f"► {len(wav_files)} fichier(s) à traiter\n")
+    print(f"► {len(wav_files)} fichier(s)\n")
 
     if not wav_files:
         print("Aucun .wav trouvé.")
         return
-
-    results = []
 
     for i, path in enumerate(wav_files):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -94,8 +97,8 @@ def main():
         print(f"[{i+1}/{len(wav_files)}]  {name}")
 
         raw = load_audio(path)
-        print(f"  Durée : {len(raw)/SR:.1f}s")
 
+        # Débruitage
         clean = spectral_subtraction(
             raw, SR, noise_profile,
             alpha=args.alpha, beta=args.beta,
@@ -103,8 +106,9 @@ def main():
         )
         out_wav = os.path.join(audio_dir, f"{name}_denoised.wav")
         sf.write(out_wav, clean, SR)
-        print(f"  ✓ Débruité → {out_wav}")
+        print(f"  ✓ Débruité")
 
+        # Plots
         if args.plots:
             plot_fft_comparison(raw, clean, SR, title=name,
                 save_path=os.path.join(plots_dir, f"{name}_fft.png"))
@@ -113,73 +117,45 @@ def main():
             plot_periodic_spectrogram(raw, clean, SR, tr_ms=args.tr_ms,
                 title=name,
                 save_path=os.path.join(plots_dir, f"{name}_periodic.png"))
-            print(f"  ✓ Plots → {plots_dir}/")
 
-        # Transcription brute (optionnelle)
-        text_raw = ""
+        # ── Choix du signal pour le STT ──
+        stt_audio = raw if args.stt_source == "raw" else clean
+
+        # ── Timecodes toujours sur le débruité (meilleure détection) ──
+        segments = detect_speech_segments(clean, SR)
+
+        # ── Comparaison optionnelle ──
         if args.compare:
-            print("  ⏳ Transcription (brut)…")
-            text_raw = transcribe_audio(raw, SR, args.language)
+            print("  ⏳ STT brut…")
+            words_r = transcribe_google(raw, SR, args.language)
+            segs_r = detect_speech_segments(raw, SR)
+            matched_r = match_words_to_segments(words_r, segs_r)
+            write_tsv(os.path.join(tsv_dir, f"{name}_brut.tsv"), matched_r)
+            print(f"  BRUT     : {' '.join(words_r) or '(vide)'}")
 
-        # Transcription débruitée (toujours)
-        print("  ⏳ Transcription (débruité)…")
-        text_clean = transcribe_audio(clean, SR, args.language)
+            print("  ⏳ STT débruité…")
+            words_d = transcribe_google(clean, SR, args.language)
+            matched_d = match_words_to_segments(words_d, segments)
+            write_tsv(os.path.join(tsv_dir, f"{name}_denoised.tsv"), matched_d)
+            print(f"  DÉBRUITÉ : {' '.join(words_d) or '(vide)'}")
 
-        if args.compare:
-            print(f"  ╔ BRUT     : {text_raw or '(vide)'}")
-            print(f"  ╚ DÉBRUITÉ : {text_clean or '(vide)'}")
-        else:
-            print(f"  ► RÉSULTAT : {text_clean or '(vide)'}")
+        # ── Transcription principale ──
+        print(f"  ⏳ STT ({args.stt_source})…")
+        words = transcribe_google(stt_audio, SR, args.language)
+        matched = match_words_to_segments(words, segments)
+        write_tsv(os.path.join(tsv_dir, f"{name}.tsv"), matched)
+        print(f"  RÉSULTAT : {' '.join(words) or '(vide)'}")
 
-        results.append(dict(file=name, raw=text_raw, clean=text_clean))
-
-    # ── Écriture des résultats ──
-    out_txt = os.path.join(args.output_dir, "transcriptions.txt")
-    with open(out_txt, "w", encoding="utf-8") as f:
-        f.write("🥣 GRANOLA — GRAdient NOise Less Audio\n")
-        f.write(f"{'='*60}\n")
-        f.write(f"Langue      : {args.language}\n")
-        f.write(f"Alpha       : {args.alpha}  |  Beta : {args.beta}\n")
-        f.write(f"Time smooth : {args.time_smooth}  |  Freq smooth : {args.freq_smooth}\n")
-        f.write(f"TR          : {args.tr_ms} ms\n")
-        f.write(f"Comparaison : {'oui' if args.compare else 'non'}\n")
-        f.write(f"{'='*60}\n\n")
-
-        all_clean = []
-        all_raw = []
-
-        for r in results:
-            w_cln = r["clean"].lower().split()
-            all_clean.extend(w_cln)
-
-            f.write(f"--- {r['file']} ---\n")
-            if args.compare:
-                w_raw = r["raw"].lower().split()
-                all_raw.extend(w_raw)
-                f.write(f"  BRUT     : {r['raw']}\n")
-                f.write(f"  DÉBRUITÉ : {r['clean']}\n")
-                f.write(f"  Mots bruts    : {w_raw}\n")
-                f.write(f"  Mots débruités: {w_cln}\n\n")
-            else:
-                f.write(f"  RÉSULTAT : {r['clean']}\n")
-                f.write(f"  Mots     : {w_cln}\n\n")
-
-        if args.compare:
-            f.write(f"\n{'='*60}\n")
-            f.write("MOTS — SANS DÉBRUITAGE\n")
-            f.write(f"{'='*60}\n")
-            f.write("\n".join(all_raw) + "\n")
-
-        f.write(f"\n{'='*60}\n")
-        f.write("MOTS — AVEC DÉBRUITAGE\n")
-        f.write(f"{'='*60}\n")
-        f.write("\n".join(all_clean) + "\n")
+        for w in matched[:5]:
+            print(f"    [{w['start']:6.2f}s → {w['end']:6.2f}s]  {w['word']}")
+        if len(matched) > 5:
+            print(f"    ... +{len(matched) - 5} mots")
 
     print(f"\n{'='*60}")
-    print(f"  ✓ Transcriptions : {out_txt}")
-    print(f"  ✓ Audio débruité : {audio_dir}/")
+    print(f"  ✓ TSV   → {tsv_dir}/")
+    print(f"  ✓ Audio → {audio_dir}/")
     if args.plots:
-        print(f"  ✓ Plots          : {plots_dir}/")
+        print(f"  ✓ Plots → {plots_dir}/")
     print(f"{'='*60}\n")
 
 
