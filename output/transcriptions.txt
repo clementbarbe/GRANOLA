@@ -1,0 +1,79 @@
+TRANSCRIPTIONS AUDIO IRM — GOOGLE SPEECH
+============================================================
+Langue : fr-FR
+Alpha  : 2.0  |  Beta : 0.02
+TR     : 1660 ms
+============================================================
+
+--- forfait_0 ---
+  BRUT     : prunelle chocolatier caramel cochon d'inde dromadaire
+  DÉBRUITÉ : prunelle chocolatier caramel cochon d'inde dromadaire
+  Mots bruts    : ['prunelle', 'chocolatier', 'caramel', 'cochon', "d'inde", 'dromadaire']
+  Mots débruités: ['prunelle', 'chocolatier', 'caramel', 'cochon', "d'inde", 'dromadaire']
+
+--- note_0 ---
+  BRUT     : établissement neurosciences Espagne
+  DÉBRUITÉ : établissement neurosciences Espagne
+  Mots bruts    : ['établissement', 'neurosciences', 'espagne']
+  Mots débruités: ['établissement', 'neurosciences', 'espagne']
+
+--- op√©ration_0 ---
+  BRUT     : haltère dindon massacre 48
+  DÉBRUITÉ : alter dindon massacre 48
+  Mots bruts    : ['haltère', 'dindon', 'massacre', '48']
+  Mots débruités: ['alter', 'dindon', 'massacre', '48']
+
+--- pi√®ce_0 ---
+  BRUT     : voiture cheval lapin crocodile bleu phare Dean
+  DÉBRUITÉ : voiture cheval lapin crocodile bleu phare Dean
+  Mots bruts    : ['voiture', 'cheval', 'lapin', 'crocodile', 'bleu', 'phare', 'dean']
+  Mots débruités: ['voiture', 'cheval', 'lapin', 'crocodile', 'bleu', 'phare', 'dean']
+
+
+============================================================
+MOTS — SANS DÉBRUITAGE
+============================================================
+prunelle
+chocolatier
+caramel
+cochon
+d'inde
+dromadaire
+établissement
+neurosciences
+espagne
+haltère
+dindon
+massacre
+48
+voiture
+cheval
+lapin
+crocodile
+bleu
+phare
+dean
+
+============================================================
+MOTS — AVEC DÉBRUITAGE
+============================================================
+prunelle
+chocolatier
+caramel
+cochon
+d'inde
+dromadaire
+établissement
+neurosciences
+espagne
+alter
+dindon
+massacre
+48
+voiture
+cheval
+lapin
+crocodile
+bleu
+phare
+dean
