@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 GRANOLA — GRAdient NOise Less Audio
-Pipeline : débruitage gradient IRM + transcription Google STT + timecodes.
 """
 
 import argparse
@@ -12,7 +11,8 @@ import soundfile as sf
 from denoise import (estimate_noise_profile, spectral_subtraction,
                      DEFAULT_ALPHA, DEFAULT_BETA,
                      DEFAULT_TIME_SMOOTH, DEFAULT_FREQ_SMOOTH)
-from transcribe import transcribe_google, detect_speech_segments, match_words_to_segments
+from transcribe import (transcribe_google, detect_speech_segments,
+                        match_words_to_segments)
 from plots import plot_fft_comparison, plot_temporal, plot_periodic_spectrogram
 
 SR = 16000
@@ -53,8 +53,7 @@ def main():
     pa.add_argument("--time_smooth", type=int,   default=DEFAULT_TIME_SMOOTH)
     pa.add_argument("--freq_smooth", type=int,   default=DEFAULT_FREQ_SMOOTH)
     pa.add_argument("--language",    default="fr-FR")
-    pa.add_argument("--stt_source",  choices=["raw", "denoised"], default="raw",
-                    help="Signal utilisé pour le STT (défaut : raw)")
+    pa.add_argument("--stt_source",  choices=["raw", "denoised"], default="raw")
     pa.add_argument("--plots",       action="store_true")
     pa.add_argument("--compare",     action="store_true")
     args = pa.parse_args()
@@ -78,7 +77,7 @@ def main():
     noise = load_audio(args.noise_file)
     noise_profile = estimate_noise_profile(noise, SR)
     print(f"► Bruit      : {args.noise_file} ({len(noise)/SR:.1f}s)")
-    print(f"► Paramètres : α={args.alpha}  β={args.beta}  "
+    print(f"► Débruitage : α={args.alpha}  β={args.beta}  "
           f"ts={args.time_smooth}  fs={args.freq_smooth}")
     print(f"► STT sur    : {args.stt_source}")
 
@@ -106,7 +105,6 @@ def main():
         )
         out_wav = os.path.join(audio_dir, f"{name}_denoised.wav")
         sf.write(out_wav, clean, SR)
-        print(f"  ✓ Débruité")
 
         # Plots
         if args.plots:
@@ -118,38 +116,32 @@ def main():
                 title=name,
                 save_path=os.path.join(plots_dir, f"{name}_periodic.png"))
 
-        # ── Choix du signal pour le STT ──
+        # ── STT : identifier les mots ──
         stt_audio = raw if args.stt_source == "raw" else clean
-
-        # ── Timecodes toujours sur le débruité (meilleure détection) ──
-        segments = detect_speech_segments(clean, SR)
-
-        # ── Comparaison optionnelle ──
-        if args.compare:
-            print("  ⏳ STT brut…")
-            words_r = transcribe_google(raw, SR, args.language)
-            segs_r = detect_speech_segments(raw, SR)
-            matched_r = match_words_to_segments(words_r, segs_r)
-            write_tsv(os.path.join(tsv_dir, f"{name}_brut.tsv"), matched_r)
-            print(f"  BRUT     : {' '.join(words_r) or '(vide)'}")
-
-            print("  ⏳ STT débruité…")
-            words_d = transcribe_google(clean, SR, args.language)
-            matched_d = match_words_to_segments(words_d, segments)
-            write_tsv(os.path.join(tsv_dir, f"{name}_denoised.tsv"), matched_d)
-            print(f"  DÉBRUITÉ : {' '.join(words_d) or '(vide)'}")
-
-        # ── Transcription principale ──
         print(f"  ⏳ STT ({args.stt_source})…")
         words = transcribe_google(stt_audio, SR, args.language)
+        n_words = len(words)
+
+        # ── Timecodes : segments sur le débruité, guidé par le nombre de mots ──
+        segments = detect_speech_segments(clean, SR, n_words_hint=n_words)
         matched = match_words_to_segments(words, segments)
         write_tsv(os.path.join(tsv_dir, f"{name}.tsv"), matched)
-        print(f"  RÉSULTAT : {' '.join(words) or '(vide)'}")
 
-        for w in matched[:5]:
+        print(f"  → {n_words} mots, {len(segments)} segments")
+        print(f"  RÉSULTAT : {' '.join(words) or '(vide)'}")
+        for w in matched:
             print(f"    [{w['start']:6.2f}s → {w['end']:6.2f}s]  {w['word']}")
-        if len(matched) > 5:
-            print(f"    ... +{len(matched) - 5} mots")
+
+        # Comparaison
+        if args.compare:
+            other = clean if args.stt_source == "raw" else raw
+            label = "denoised" if args.stt_source == "raw" else "brut"
+            print(f"  ⏳ STT ({label})…")
+            words2 = transcribe_google(other, SR, args.language)
+            segments2 = detect_speech_segments(clean, SR, n_words_hint=len(words2))
+            matched2 = match_words_to_segments(words2, segments2)
+            write_tsv(os.path.join(tsv_dir, f"{name}_{label}.tsv"), matched2)
+            print(f"  {label.upper():>8} : {' '.join(words2) or '(vide)'}")
 
     print(f"\n{'='*60}")
     print(f"  ✓ TSV   → {tsv_dir}/")

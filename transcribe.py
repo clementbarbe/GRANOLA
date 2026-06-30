@@ -1,8 +1,7 @@
 """
 GRANOLA — Transcription Google STT + timecodes par détection d'énergie.
 
-Les trois fonctions sont exportées séparément pour que main.py
-puisse les combiner librement.
+Contexte : mots isolés (~800 ms chacun) dans des runs de ~15s.
 """
 
 import numpy as np
@@ -27,7 +26,6 @@ def transcribe_google(audio, sr, language="fr-FR"):
     recognizer = sr_lib.Recognizer()
     with sr_lib.AudioFile(tmp.name) as source:
         audio_data = recognizer.record(source)
-
     os.unlink(tmp.name)
 
     try:
@@ -41,91 +39,141 @@ def transcribe_google(audio, sr, language="fr-FR"):
     return text.strip().split()
 
 
-def detect_speech_segments(audio, sr, frame_ms=20, energy_percentile=30,
-                           min_duration_ms=80, min_silence_ms=100,
-                           smooth_ms=60):
+def detect_speech_segments(audio, sr, n_words_hint=None):
     """
-    Détecte les segments de parole via l'enveloppe d'énergie.
-    Retourne [(start_s, end_s), ...].
-    """
-    frame_len = int(sr * frame_ms / 1000)
-    hop = frame_len
+    Détecte les segments de parole par enveloppe d'énergie.
 
+    Approche simple et robuste :
+    1. Calculer l'enveloppe d'énergie lissée (fenêtres de 50 ms)
+    2. Seuil = percentile adaptatif
+    3. Fusionner tout ce qui est à moins de 200 ms
+    4. Jeter tout ce qui fait moins de 400 ms
+    5. Si on connaît le nombre de mots, ajuster le seuil
+       pour obtenir le bon nombre de segments
+    """
+    # ── Enveloppe d'énergie ──
+    frame_ms = 10
+    hop = int(sr * frame_ms / 1000)
     n_frames = len(audio) // hop
-    energy = np.zeros(n_frames)
-    for i in range(n_frames):
-        frame = audio[i * hop: (i + 1) * hop]
-        energy[i] = np.sum(frame ** 2)
 
-    smooth_frames = max(1, int(smooth_ms / frame_ms))
-    energy_smooth = uniform_filter1d(energy, size=smooth_frames)
+    energy = np.array([
+        np.sum(audio[i * hop:(i + 1) * hop] ** 2)
+        for i in range(n_frames)
+    ])
 
-    threshold = np.percentile(energy_smooth, energy_percentile)
-    threshold = max(threshold, np.median(energy_smooth) * 0.5)
+    # Lissage large (50 ms) pour ignorer les micro-fluctuations
+    smooth = max(1, int(50 / frame_ms))
+    energy = uniform_filter1d(energy, size=smooth)
 
-    is_speech = energy_smooth > threshold
+    # ── Recherche du bon seuil ──
+    # On balaye le percentile pour trouver le bon nombre de segments
+    min_seg_ms = 400
+    min_silence_ms = 200
+    min_seg_frames = max(1, int(min_seg_ms / frame_ms))
+    min_sil_frames = max(1, int(min_silence_ms / frame_ms))
 
-    segments = []
-    in_seg = False
-    start = 0
+    def segments_at_percentile(pct):
+        thr = np.percentile(energy, pct)
+        is_speech = energy > thr
 
-    for i in range(len(is_speech)):
-        if is_speech[i] and not in_seg:
-            start = i
-            in_seg = True
-        elif not is_speech[i] and in_seg:
-            segments.append((start, i))
-            in_seg = False
-    if in_seg:
-        segments.append((start, len(is_speech)))
+        # Extraire segments
+        segs = []
+        in_seg = False
+        start = 0
+        for k in range(len(is_speech)):
+            if is_speech[k] and not in_seg:
+                start = k
+                in_seg = True
+            elif not is_speech[k] and in_seg:
+                segs.append((start, k))
+                in_seg = False
+        if in_seg:
+            segs.append((start, len(is_speech)))
 
-    min_frames = max(1, int(min_duration_ms / frame_ms))
-    segments = [(s, e) for s, e in segments if (e - s) >= min_frames]
+        # Fusionner proches
+        merged = []
+        for s, e in segs:
+            if merged and (s - merged[-1][1]) < min_sil_frames:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
 
-    min_sil = max(1, int(min_silence_ms / frame_ms))
-    merged = []
-    for s, e in segments:
-        if merged and (s - merged[-1][1]) < min_sil:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
+        # Filtrer courts
+        merged = [(s, e) for s, e in merged if (e - s) >= min_seg_frames]
 
-    return [(s * hop / sr, e * hop / sr) for s, e in merged]
+        return merged
+
+    if n_words_hint and n_words_hint > 0:
+        # On cherche le percentile qui donne le bon nombre de segments
+        best_segs = None
+        best_diff = float('inf')
+
+        for pct in range(30, 85, 2):
+            segs = segments_at_percentile(pct)
+            diff = abs(len(segs) - n_words_hint)
+            if diff < best_diff:
+                best_diff = diff
+                best_segs = segs
+            if diff == 0:
+                break
+
+        segments = best_segs
+    else:
+        # Pas d'indice → percentile 60 (conservateur)
+        segments = segments_at_percentile(60)
+
+    # Convertir en secondes
+    return [(s * hop / sr, e * hop / sr) for s, e in segments]
 
 
 def match_words_to_segments(words, segments):
     """
-    Associe chaque mot (dans l'ordre) à un segment temporel.
+    Associe chaque mot à un segment, dans l'ordre.
+
+    Si même nombre → un pour un.
+    Si plus de segments → on prend les N plus longs.
+    Si plus de mots → on répartit dans les segments.
     """
     if not words:
         return []
     if not segments:
         return [{"word": w, "start": 0.0, "end": 0.0} for w in words]
 
-    result = []
     n_words = len(words)
     n_segs = len(segments)
 
-    if n_words <= n_segs:
-        for i, word in enumerate(words):
-            s, e = segments[i]
-            result.append({"word": word, "start": s, "end": e})
-    else:
-        words_per_seg = n_words / n_segs
-        idx = 0
-        for seg_i, (s, e) in enumerate(segments):
-            next_idx = min(int(round((seg_i + 1) * words_per_seg)), n_words)
-            seg_words = words[idx:next_idx]
-            if not seg_words:
-                continue
-            dt = (e - s) / len(seg_words)
-            for j, w in enumerate(seg_words):
-                result.append({"word": w, "start": s + j * dt,
-                               "end": s + (j + 1) * dt})
-            idx = next_idx
+    if n_words == n_segs:
+        # Cas idéal
+        return [{"word": w, "start": s, "end": e}
+                for w, (s, e) in zip(words, segments)]
 
-        for w in words[idx:]:
-            result.append({"word": w, "start": segments[-1][0],
-                           "end": segments[-1][1]})
+    if n_words < n_segs:
+        # Plus de segments que de mots → garder les N plus longs
+        durations = [(e - s, i) for i, (s, e) in enumerate(segments)]
+        durations.sort(reverse=True)
+        keep_idx = sorted([idx for _, idx in durations[:n_words]])
+        return [{"word": w, "start": segments[idx][0], "end": segments[idx][1]}
+                for w, idx in zip(words, keep_idx)]
+
+    # Plus de mots que de segments → répartir
+    result = []
+    words_per_seg = n_words / n_segs
+    idx = 0
+    for seg_i, (s, e) in enumerate(segments):
+        next_idx = min(int(round((seg_i + 1) * words_per_seg)), n_words)
+        seg_words = words[idx:next_idx]
+        if not seg_words:
+            continue
+        dt = (e - s) / len(seg_words)
+        for j, w in enumerate(seg_words):
+            result.append({"word": w,
+                           "start": s + j * dt,
+                           "end": s + (j + 1) * dt})
+        idx = next_idx
+
+    for w in words[idx:]:
+        result.append({"word": w,
+                       "start": segments[-1][0],
+                       "end": segments[-1][1]})
 
     return result
